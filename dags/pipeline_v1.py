@@ -1,5 +1,5 @@
 import pandas as pd
-
+import pickle
 import airflow
 from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
@@ -11,14 +11,14 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score
 from joblib import dump, load
 
-
+import pickle
 
 
 # parametros, hay mas
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
-    'start_date': datetime(2024, 10, 13),
+    'start_date': datetime(2024, 10, 12),
     'email ':['jhayr1998@gmail.com'],
     'email_on_failure': False,
     'email_on_retry': False,
@@ -34,18 +34,17 @@ dag = DAG(
     schedule_interval='0 17 * * *',
 )
 
-
-
-
-
-
-def load_data():
-    data_path= '/opt/airflow/dags/data/train.csv'
+def load_data(ti):
+    data_path = '/opt/airflow/dags/data/train.csv'
     df = pd.read_csv(data_path)
-    return df
+
+    # serializar el df a JSON como string
+    ti.xcom_push(key='train_data', value=df.to_json(orient='records'))
+
 
 def preprocess_data(ti):
-    df = ti.xcom_pull(task_ids='load_data')
+    json_data = ti.xcom_pull(task_ids='load_data', key='train_data')
+    df = pd.read_json(json_data)
 
     df=df[(df['person_age'] >= 20) & (df['person_age'] <= 60)]
     df=df[(df['person_income'] >= 0) & (df['person_income'] <= 300000)]
@@ -65,10 +64,20 @@ def preprocess_data(ti):
     scaler= StandardScaler()
     scaler.fit(features[numeric])
     features[numeric] = scaler.transform(features[numeric])
-    return features,target,df_id
+   
+    # serializar el df a JSON como string
+    ti.xcom_push(key='preprocessed_features', value=features.to_json(orient='records'))
+    ti.xcom_push(key='preprocessed_target', value=target.to_json(orient='records'))
+    ti.xcom_push(key='df_id', value=df_id.to_json(orient='records'))
+
 
 def train_model(ti):
-    features,target,df_id=ti.xcom_pull(task_ids='preprocess_data')
+    # Deserializamos el DataFrame desde pickle
+    json_data = ti.xcom_pull(task_ids='preprocess_data', key='preprocessed_features')
+    features = pd.read_json(json_data)
+    json_data = ti.xcom_pull(task_ids='preprocess_data', key='preprocessed_target')
+    target = pd.read_json(json_data)
+
     model= RandomForestClassifier(random_state=777, n_estimators=450 , max_depth= 40)
     model.fit(features,target)
     model_path= '/opt/airflow/dags/data/model.joblib'
@@ -78,7 +87,13 @@ def train_model(ti):
 def evaluate_model(ti):
     model_path= ti.xcom_pull(task_ids='train_model')
     model= load(model_path)
-    features,target,df_id=ti.xcom_pull(task_ids='preprocess_data')
+
+    # Deserializamos el DataFrame desde pickle
+    json_data = ti.xcom_pull(task_ids='preprocess_data', key='preprocessed_features')
+    features = pd.read_json(json_data)
+    json_data = ti.xcom_pull(task_ids='preprocess_data', key='preprocessed_target')
+    target = pd.read_json(json_data)
+
     predictions = model.predict(features)
     accuracy=  accuracy_score(target, predictions)
     return accuracy
